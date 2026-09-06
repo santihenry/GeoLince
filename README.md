@@ -1,5 +1,11 @@
 # GeoLince
 
+> [!CAUTION]
+> **Esto es una herramienta de cheat.** Usarla en partidas públicas o competitivas va
+> contra los términos de servicio de GeoGuessr y puede terminar en la suspensión de la
+> cuenta. Úsala bajo tu responsabilidad, idealmente en partidas privadas o para
+> experimentar.
+
 Userscript (Tampermonkey) para GeoGuessr que muestra en pantalla las coordenadas reales
 de la ronda, las abre en un mapa aparte y — en la versión completa — automatiza el juego
 en modo Streaks.
@@ -16,11 +22,6 @@ dependencias (solo la API de geocoding de OpenCage).
 
 Si dudas, empezá por la **Lite**: es la mitad de código, no depende de los selectores de
 GeoGuessr (que cambian en cada deploy del sitio) y hace todo lo que sirve para jugar vos.
-
-> **Aviso**
-> Esto es una herramienta de cheat. Usarla en partidas públicas o competitivas va contra
-> los términos de servicio de GeoGuessr y puede terminar en la suspensión de la cuenta.
-> Úsala bajo tu responsabilidad, idealmente en partidas privadas o para experimentar.
 
 ---
 
