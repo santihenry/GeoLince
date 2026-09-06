@@ -8,6 +8,14 @@
 // @grant        none
 // ==/UserScript==
 
+// AVISO
+//
+// Esto es una herramienta de cheat, y no se recomienda usarla para jugar. Va contra
+// los terminos de servicio de GeoGuessr, le arruina la partida a los demas y puede
+// terminar en la suspension de la cuenta. Se publica como ejercicio tecnico, no como
+// una forma de ganar: usala en partidas privadas o para leer el codigo. Corre por
+// tu cuenta.
+
 // Version liviana: solo la informacion en vivo de la ronda (coordenadas, lugar y
 // mapa aparte). No toca el DOM de GeoGuessr ni automatiza nada, asi que no se
 // rompe cuando el sitio cambia sus clases CSS.

@@ -1,10 +1,11 @@
 # GeoLince
 
 > [!CAUTION]
-> **Esto es una herramienta de cheat.** Usarla en partidas públicas o competitivas va
-> contra los términos de servicio de GeoGuessr y puede terminar en la suspensión de la
-> cuenta. Úsala bajo tu responsabilidad, idealmente en partidas privadas o para
-> experimentar.
+> **Esto es una herramienta de cheat, y no recomendamos usarla para jugar.**
+> Va contra los términos de servicio de GeoGuessr, le arruina la partida a los demás y
+> puede terminar en la suspensión de tu cuenta. Se publica como ejercicio técnico, no
+> como una forma de ganar: leé el código, probalo en partidas privadas. Lo que hagas
+> con esto corre por tu cuenta.
 
 Userscript (Tampermonkey) para GeoGuessr que muestra en pantalla las coordenadas reales
 de la ronda, las abre en un mapa aparte y — en la versión completa — automatiza el juego
@@ -27,6 +28,7 @@ GeoGuessr (que cambian en cada deploy del sitio) y hace todo lo que sirve para j
 
 ## Índice
 
+- [Por qué existe esto](#por-qué-existe-esto)
 - [Qué hace](#qué-hace)
 - [Instalación](#instalación)
 - [Configuración](#configuración)
@@ -39,6 +41,37 @@ GeoGuessr (que cambian en cada deploy del sitio) y hace todo lo que sirve para j
 - [Estructura del repo](#estructura-del-repo)
 - [Historial de versiones](#historial-de-versiones)
 - [Licencia](#licencia)
+
+---
+
+## Por qué existe esto
+
+GeoLince nació como un experimento técnico, no como una forma de ganar partidas. Lo que
+tiene de interesante está en cómo funciona por dentro:
+
+- Interceptar `XMLHttpRequest` y `fetch` para leer el tráfico de Street View sin tocar la
+  página.
+- Encontrar la latitud y longitud reales dentro de un JSON anidado y sin documentar.
+- Llegar al estado interno de un componente de React desde el DOM, por la key
+  `__reactFiber$…`, para reproducir una interacción que un click sintético no logra.
+- Sostener selectores contra un sitio que cambia sus clases CSS en cada deploy.
+
+Todo eso está explicado en [Cómo funciona por dentro](#cómo-funciona-por-dentro), que es
+la parte del documento que vale la pena leer.
+
+**Ahora, la otra cara.** Un juego de adivinar dónde estás *sin* la respuesta es el juego;
+con la respuesta en pantalla no queda nada. Y en partidas públicas, ranked o multiplayer,
+el que pierde no es GeoGuessr: es la persona del otro lado, que sí está jugando en serio.
+
+Así que la recomendación honesta:
+
+| | |
+|---|---|
+| **Sí** | Leer el código, correrlo en partidas privadas o en singleplayer contra vos mismo, usarlo para aprender cómo se arma un userscript. |
+| **No** | Partidas competitivas, ranked, multiplayer con desconocidos, torneos. |
+| **Nunca** | Presentar los resultados como propios en una tabla de posiciones o para ganarle a alguien. |
+
+Si te gusta GeoGuessr, jugá sin esto. Es mejor juego.
 
 ---
 
