@@ -16,7 +16,7 @@ Vienen **dos versiones**, y se instala **una sola**:
 | | Para qué | Instalá esto |
 |---|---|---|
 | **Lite** | Jugar vos, en partidas simples o multiplayer, viendo en vivo coordenadas, calle, ciudad, provincia y país, con el mapa en otra ventana. No toca el DOM de GeoGuessr ni hace clicks. | [`geolince-lite.user.js`](geolince-lite.user.js) |
-| **Completa** | Todo lo anterior **más** el AutoPlay: marca, adivina, pasa de ronda y arranca partida nueva en modo Streaks. | [`geolince.user.js`](geolince.user.js) |
+| **Completa** | Todo lo anterior **más** el AutoPlay (marca, adivina, pasa de ronda y arranca partida nueva en modo Streaks) y el AFK multiplayer (encadena duelos sin jugarlos). | [`geolince.user.js`](geolince.user.js) |
 
 Las dos son la versión 0.7, corren en `https://www.geoguessr.com/*` y no tienen
 dependencias (solo la API de geocoding de OpenCage).
@@ -35,6 +35,7 @@ GeoGuessr (que cambian en cada deploy del sitio) y hace todo lo que sirve para j
 - [El panel](#el-panel)
 - [Atajos de teclado](#atajos-de-teclado)
 - [AutoPlay (Streaks)](#autoplay-streaks)
+- [AFK multiplayer](#afk-multiplayer)
 - [Cómo funciona por dentro](#cómo-funciona-por-dentro)
 - [Datos guardados (localStorage)](#datos-guardados-localstorage)
 - [Problemas frecuentes](#problemas-frecuentes)
@@ -84,6 +85,7 @@ Si te gusta GeoGuessr, jugá sin esto. Es mejor juego.
 | **Mapa en ventana aparte** | Abre la posición en Google Maps o OpenStreetMap en una ventana separada, con control de zoom. Ideal para un segundo monitor. |
 | **Marcador automático** *(solo completa)* | Coloca el pin en el mapa de guess de GeoGuessr en las coordenadas reales (con desvío configurable), hablándole directamente al mapa vía React Fiber. |
 | **AutoPlay (Streaks)** *(solo completa)* | Juega solo: marca, adivina, pasa de ronda y arranca partida nueva, con una cadena de reintentos cuando no logra detectar coordenadas. |
+| **AFK multiplayer** *(solo completa)* | Encadena duelos sin jugarlos: entra a la cola, deja correr las rondas sin marcar el mapa, toca **Continuar** al terminar y vuelve a tocar **Jugar**. |
 | **Panel plegable** | Tres bloques que se muestran/ocultan por separado, y opción de sacar todo el panel a su propia ventana. |
 
 ---
@@ -183,7 +185,7 @@ apagada = gris. Por ejemplo, con **COORDS** y **ATAJOS** apagadas queda solo el 
 |---|---|
 | **ZOOM** | Botones de zoom del mapa y nivel actual. |
 | **COORDS** | Coordenadas en grados/minutos/segundos y datos del lugar. |
-| **ATAJOS** | Lista de teclas, y el estado del AutoPlay en la versión completa. |
+| **ATAJOS** | Lista de teclas, y el estado del AutoPlay y del AFK multiplayer en la versión completa. |
 
 `Ctrl + E` cicla las vistas sin usar el mouse:
 
@@ -228,7 +230,7 @@ Ahí dentro:
 | `C` | Zoom −2 y actualiza el mapa. |
 | `N` | Refresca coordenadas e información del lugar (llama al geocoding). |
 | `M` | Alterna el proveedor de mapa: Google Maps ↔ OpenStreetMap. |
-| `*` | Detiene el AutoPlay. |
+| `*` | Detiene el AutoPlay y el AFK multiplayer. |
 | `Ctrl + Q` | Muestra/oculta el panel. |
 | `Ctrl + E` | Cicla las vistas del panel (todo / sin atajos / solo zoom / cerrado). |
 | `Alt + P` | Saca el panel a una ventana aparte o lo devuelve a la página. |
@@ -250,7 +252,8 @@ Ahí dentro:
 | `Alt + 7` | AutoPlay Streaks: 50 partidas de 5 rondas. |
 | `Alt + 8` | AutoPlay Streaks: 50 partidas de 25 rondas. |
 | `Alt + 9` | Marca a ~0.00035° del punto real (5.000 puntos). |
-| `Alt + *` | Detiene el AutoPlay. |
+| `Alt + 0` | Enciende/apaga el **AFK multiplayer**. |
+| `Alt + *` | Detiene el AutoPlay y el AFK multiplayer. |
 
 ---
 
@@ -282,6 +285,56 @@ Se detiene con `*` (o `Alt + *`). El estado se ve en vivo en el bloque AUTOPLAY 
 Los clicks no son de un solo intento: `clickAndWait()` hace polling hasta 6–8 segundos
 esperando que el botón exista, sea visible y esté habilitado, y suma al contador
 `Fallos` cuando se queda sin tiempo.
+
+---
+
+## AFK multiplayer
+
+> También existe solo en [`geolince.user.js`](geolince.user.js).
+
+Sirve para dejar la cuenta sumando partidas de duelos sin jugarlas: el rival juega solo y
+nosotros no marcamos nunca el mapa. Se enciende con `Alt + 0` o con el botón
+**Activar AFK** del bloque MULTIPLAYER AFK del panel.
+
+El bucle revisa la pantalla cada 1,2 s y hace una sola cosa por vuelta:
+
+| Estado | Qué hace |
+|---|---|
+| Lobby de duelos (`/multiplayer/duels`) | Click en **Jugar**. |
+| Buscando rival | Nada: volver a tocar **Jugar** cancelaría la cola. Si pasan 3 minutos, reintenta. |
+| En partida | **Nada.** No marca, no adivina, no pasa de ronda: las rondas se vencen solas por tiempo. |
+| Pantalla final (y los carteles de ascenso) | Click en **Continuar**. |
+| Cualquier otra página | Vuelve al lobby a los 8 segundos. |
+
+Detalles:
+
+- Solo clickea **Jugar** y **Continuar**, buscados por texto visible
+  (`findVisibleButtonByText`), igual que el resto del script. Mira `button`, `a`,
+  `[role="button"]` y divs con clase de botón, porque el **Jugar** del lobby no siempre
+  es un `<button>`, y se queda con el elemento más interno. Nunca toca el mapa de guess.
+- Entre click y click deja 3,5 s, y entre dos **Jugar** al menos 45 s.
+- Reconoce la ruta con y sin prefijo de idioma (`/es/multiplayer/duels`).
+- En duelos la URL **no cambia** entre el lobby y la partida, así que la partida se
+  reconoce por pantalla: el mapa de guess (`[class*="guess-map_"]`, el mismo selector que
+  usa `findMapCanvasElement()`), que en el lobby no existe. Si además hay un **Jugar** a
+  la vista, manda el lobby: nunca da por empezada una partida que no empezó.
+- El estado queda en `gg_afkMp`, así el modo sobrevive a las recargas de GeoGuessr.
+  Si la última señal de vida tiene más de 10 minutos, no se reanuda solo.
+- AutoPlay y AFK no corren juntos: arrancar uno apaga el otro.
+- Si pasan 10 minutos dentro de una partida sin avanzar (señal de que no reconoció el
+  botón de la pantalla final), lo avisa por consola con todo lo clickeable que había
+  y lo deja marcado en el panel.
+- Para depurar desde la consola: `GeoLinceAFK.estado()`, `GeoLinceAFK.clickeables()`,
+  `GeoLinceAFK.on()` y `GeoLinceAFK.off()`.
+
+Se detiene con `Alt + 0`, con `*` o con el mismo botón del panel.
+
+El bloque del panel muestra:
+
+| Línea | Significado |
+|---|---|
+| `● ACTIVO / APAGADO · Partidas n` | Si el bucle corre, y cuántas partidas terminó desde que se encendió. |
+| Texto de estado | `buscando rival`, `en partida, sin marcar`, `cerrando resultados`, `volviendo al lobby`, `trabado, mira la consola`… |
 
 ---
 
@@ -345,6 +398,7 @@ primero (`findButtonByText('guess', 'adivina', …)`) y usa selectores por prefi
 | `gg_panelPos` | Posición del panel dentro de la página (`{left, top}`). |
 | `gg_panelState` | Qué bloques están visibles y si el panel está minimizado (`{parts:[bool,bool,bool], closed}`). |
 | `gg_panelPopout` | Si el panel estaba en su ventana aparte. |
+| `gg_afkMp` | Estado del AFK multiplayer (`{on, ts, games}`), para seguir después de una recarga. |
 | `gg_panelMode`, `gg_panelCollapsed` | Formatos viejos del estado del panel; se migran solos y ya no se escriben. |
 
 Para resetear el panel a como viene de fábrica, borrá las claves `gg_*` desde la consola:
@@ -382,7 +436,7 @@ AutoPlay (Streaks y Clásico) y los clicks automáticos de `Alt + 1…6`.
 
 | Archivo | Qué es |
 |---|---|
-| `geolince.user.js` | Versión completa (v0.7): info en vivo + AutoPlay. |
+| `geolince.user.js` | Versión completa (v0.7): info en vivo + AutoPlay + AFK multiplayer. |
 | `geolince-lite.user.js` | Versión liviana (v0.7): solo la info en vivo y el mapa. |
 | `loct` | Archivo suelto con una URL de mapa de ejemplo. |
 | `config/opencage.key.example.txt` | Plantilla para tu API key. Copiala como `config/opencage.key.txt` (ignorado por git). |
