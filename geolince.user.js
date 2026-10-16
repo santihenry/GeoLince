@@ -131,6 +131,15 @@
         const response = await origFetch(...args);
         const clonedResponse = await response.clone().blob();
         window.postMessage({ type: 'fetch', data: clonedResponse }, '*');
+
+        // Las reglas de la partida (no move / NMPZ) vienen en el JSON de la API
+        // de GeoGuessr, y el blob de arriba no sirve para leerlas: va el texto.
+        try {
+            if ((response.headers.get('content-type') || '').includes('json')) {
+                window.postMessage({ type: 'fetch-json', data: await response.clone().text() }, '*');
+            }
+        } catch (e) { /* noop */ }
+
         return response;
     };
 
@@ -154,6 +163,9 @@
                         }
                     } catch (e) { }
                 }
+
+                // Barato: solo se mira el JSON que menciona las restricciones.
+                if (typeof msg === 'string' && msg.includes('forbid')) afkLeerReglas(arr);
             } catch {
                 return;
             }
@@ -639,11 +651,19 @@
     const AFK_LOCALE_RE = new RegExp(`^/(${AFK_LOCALES.join('|')})(?=/|$)`);
     const AFK_LOBBY_PATH = '/multiplayer/duels';
 
-    const AFK_TICK = 1200;                     // cada cuanto mira la pantalla
+    const AFK_TICK = 800;                      // cada cuanto mira la pantalla
     const AFK_CLICK_COOLDOWN = 3500;           // margen minimo entre click y click
     const AFK_PLAY_COOLDOWN = 45000;           // no reintentar "Jugar" antes de esto
     const AFK_QUEUE_TIMEOUT = 180000;          // si la cola tarda mas que esto, se reintenta
     const AFK_STUCK_TIMEOUT = 10 * 60 * 1000;  // partida que no avanza: se anota en la consola
+    const AFK_STEP_MIN = 600;                  // entre paso y paso de una caminata
+    const AFK_STEP_MAX = 1300;
+    const AFK_PAUSE_MIN = 1000;                // entre una caminata y la siguiente
+    const AFK_PAUSE_MAX = 4000;
+    const AFK_MOVE_STEP = 70;                  // ms entre micro-pasos de un giro
+    const AFK_MOVE_STEPS = 10;                 // micro-pasos por giro
+    const AFK_KEY_HOLD = 350;                  // cuanto se mantiene apretada la flecha del paso
+    const AFK_KEY_REPEAT = 50;                 // cada cuanto repite el keydown mientras esta hundida
     const AFK_LOBBY_TIMEOUT = 8000;            // fuera del lobby y sin nada que hacer -> volver al lobby
     const AFK_RESUME_WINDOW = 10 * 60 * 1000;  // tras un reload, reanudar solo si fue recien
 
@@ -657,8 +677,21 @@
     let afkIdleSince = 0;        // ultimo click o cambio de estado
     let afkInMatchBefore = false;
     let afkStuckLogged = false;  // para no repetir el aviso de trabado
+    let afkMoveOn = localStorage.getItem('gg_afkQuieto') !== 'true';   // paseo o estatua
+    let afkReglas = null;        // { girar, mover } leidas de la partida
+    let afkMatchLogged = false;  // para avisar una sola vez que reconocio la partida
+    let afkErrorLogged = false;  // idem con los errores del bucle
+    let afkTestMsg = '';         // resultado de la ultima prueba manual
+    let afkPano = null;          // panorama de Google, si se lo encuentra
+    let afkMoving = false;       // hay un giro en curso
+    let afkMoveOk = false;       // el ultimo intento de movimiento hizo algo
+    let afkNextMove = 0;         // cuando toca el proximo movimiento
+    let afkPasos = 0;            // pasos que le quedan a la caminata actual
+    let afkPosAntes = null;      // donde estabamos antes del ultimo paso
+    let afkRumboCalle = null;    // rumbo del ultimo tramo caminado
     let afkDisplay;              // nodo de estado en el panel
     let afkButton;               // boton de encendido en el panel
+    let afkMoveButton;           // boton de paseo / quieto
 
     // No todo lo clickeable de GeoGuessr es un <button>: el "Jugar" del lobby de
     // duelos y varios botones de las pantallas finales son <a> o divs con onClick.
@@ -679,12 +712,14 @@
     // elemento mas interno: con el selector ancho, el texto del boton tambien
     // aparece en sus wrappers, y el que menos texto tiene es el boton en si.
     function findVisibleButtonByText(...variantes) {
-        const variantesLower = variantes.map(v => v.toLowerCase());
+        // Palabra completa, no "incluye": si no, "play" matchea "players" y
+        // "replay", que estan en pantalla en plena partida.
+        const patron = new RegExp('\\b(' + variantes.join('|') + ')\\b', 'i');
 
         const candidatos = afkClickables().filter(el => {
-            const texto = (el.innerText || '').trim().toLowerCase();
+            const texto = (el.innerText || '').trim();
             if (!texto || texto.length > 40) return false;   // 40 = ya no es un boton, es un bloque
-            return variantesLower.some(v => texto.includes(v));
+            return patron.test(texto);
         });
 
         candidatos.sort((a, b) => {
@@ -719,16 +754,39 @@
     // En duelos la URL no cambia: /multiplayer/duels es la misma en el lobby y
     // jugando. Asi que la partida se reconoce por pantalla, con el mismo mapa de
     // guess que usa findMapCanvasElement(), que no existe en el lobby.
-    const AFK_MATCH_SELECTOR = '[class*="guess-map_"]';
+    // Senales que solo existen jugando: alcanza con una.
+    const AFK_MATCH_FUERTE = [
+        '[class*="guess-map"]',     // el mapa de la esquina
+        '[class*="guessMap"]',
+        '[class*="health-bar"]',    // las barras de vida del duelo
+        '[class*="healthBar"]',
+        '[class*="game-status"]',
+        '[class*="gameStatus"]'
+    ].join(', ');
+
+    // El Street View tambien se ve de fondo en el lobby, asi que solo cuenta
+    // si ademas no hay un boton de Jugar a la vista.
+    const AFK_MATCH_DEBIL = '.widget-scene-canvas';
+
+    const AFK_MATCH_SELECTOR = AFK_MATCH_FUERTE + ', ' + AFK_MATCH_DEBIL;
 
     // Dentro de una partida ya empezada (duelo, team duels, battle royale...).
     function afkInMatch() {
         if (/^\/(duels|team-duels|battle-royale|bullseye|live-challenge)\//.test(afkPath())) return true;
-        if (!document.querySelector(AFK_MATCH_SELECTOR)) return false;
+        const fuerte = document.querySelector(AFK_MATCH_FUERTE);
+        const debil = fuerte || document.querySelector(AFK_MATCH_DEBIL);
+        if (!debil) return false;
 
-        // Si el mapa quedo en el DOM pero hay un "Jugar" a la vista, es el lobby:
-        // nunca hay que dar por empezada una partida que no empezo.
-        return !findVisibleButtonByText('jugar', 'play');
+        // Con una senal debil nomas, un "Jugar" a la vista manda: es el lobby,
+        // y no hay que dar por empezada una partida que no empezo.
+        if (!fuerte && findVisibleButtonByText('jugar', 'play')) return false;
+
+        if (!afkMatchLogged) {
+            afkMatchLogged = true;
+            console.log('[GeoLince][AFK] partida reconocida por:',
+                        typeof debil.className === 'string' ? debil.className : debil.tagName);
+        }
+        return true;
     }
 
     // Lobby en el idioma en el que este navegando el usuario.
@@ -742,6 +800,379 @@
         if (findVisibleButtonByText('cancelar', 'cancel')) return true;
         const texto = (document.body.innerText || '').toLowerCase();
         return texto.includes('buscando') || texto.includes('searching') || texto.includes('finding');
+    }
+
+    // ---- Movimiento dentro de la ronda --------------------------------------
+    //
+    // Quedarse clavado mirando el mismo punto toda la partida no se parece a
+    // nadie jugando, asi que cada tantos segundos la vista gira.
+    //
+    // Girar se hace por la API del panorama (setPov), no simulando el mouse:
+    // Google ignora los eventos sinteticos para el paneo. Probado contra un
+    // StreetViewPanorama real del Maps JS API, el mismo que usa GeoGuessr: un
+    // arrastre de verdad giro 108 grados y el mismo arrastre despachado por
+    // codigo, 0. Con el teclado pasa lo mismo.
+    //
+    // Como setPov() gira igual donde el modo no deja, el permiso sale de las
+    // reglas de la propia partida (abajo), no de adivinar. El paso adelante va
+    // por la flecha del teclado: si lo atiende GeoGuessr, el mismo juego decide
+    // si corresponde; si lo atiende Google, no pasa nada. El mapa de guess no
+    // se toca nunca.
+
+    // GeoGuessr manda las restricciones en el JSON de la partida. Se busca
+    // forbidRotating / forbidMoving en cualquier JSON interceptado.
+    function afkLeerReglas(obj, profundidad = 0) {
+        if (!obj || typeof obj !== 'object' || profundidad > 6) return false;
+
+        if (typeof obj.forbidRotating === 'boolean' || typeof obj.forbidMoving === 'boolean') {
+            const girar = obj.forbidRotating !== true;
+            const mover = obj.forbidMoving !== true;
+
+            if (!afkReglas || afkReglas.girar !== girar || afkReglas.mover !== mover) {
+                afkReglas = { girar, mover };
+                console.log('[GeoLince][AFK] reglas de la partida -> girar:', girar, '/ mover:', mover);
+                if (typeof updateAfkDisplay === 'function') updateAfkDisplay();
+            }
+            return true;
+        }
+
+        for (const k of Object.keys(obj)) {
+            if (afkLeerReglas(obj[k], profundidad + 1)) return true;
+        }
+        return false;
+    }
+
+    // Sin reglas a la vista se asume que girar esta permitido: es lo normal, y
+    // lo unico que lo prohibe es NMPZ.
+    function afkPuedeGirar() {
+        return afkMoveOn && (afkReglas ? afkReglas.girar : true);
+    }
+
+    function afkPuedeMover() {
+        return afkMoveOn && (afkReglas ? afkReglas.mover : true);
+    }
+
+    // El canvas donde Google dibuja la calle.
+    function afkCanvas() {
+        return document.querySelector('.widget-scene-canvas')
+            || document.querySelector('[class*="game-layout_panorama"] canvas')
+            || null;
+    }
+
+    function afkEsPanorama(o) {
+        return Boolean(o) && typeof o === 'object'
+            && typeof o.getPov === 'function'
+            && typeof o.setPov === 'function';
+    }
+
+    // El panorama de Google no cuelga del DOM: se llega por el fiber de React,
+    // el mismo camino que usa clickMapAt() para el mapa de guess.
+    function afkFindPanorama() {
+        if (afkEsPanorama(afkPano)) return afkPano;
+
+        const lienzo = afkCanvas();
+        if (!lienzo) return null;
+
+        // Del canvas de Google hacia arriba, hasta el primer nodo de React.
+        let nodo = lienzo;
+        let clave = null;
+        while (nodo && !clave) {
+            clave = Object.keys(nodo).find(k => k.startsWith('__reactFiber$')) || null;
+            if (!clave) nodo = nodo.parentElement;
+        }
+        if (!nodo || !clave) return null;
+
+        const guardar = (obj, donde) => {
+            afkPano = obj;
+            console.log('[GeoLince][AFK] panorama encontrado en', donde);
+            return afkPano;
+        };
+
+        let fiber = nodo[clave];
+        for (let i = 0; i < 15 && fiber; i++, fiber = fiber.return) {
+            const props = fiber.memoizedProps;
+            if (props && typeof props === 'object') {
+                for (const k of Object.keys(props)) {
+                    if (afkEsPanorama(props[k])) return guardar(props[k], 'props.' + k);
+                }
+            }
+
+            // Los hooks son una lista enlazada; suele estar en un useRef
+            // (.current) o en un useState.
+            let hook = fiber.memoizedState;
+            for (let j = 0; j < 25 && hook && typeof hook === 'object'; j++, hook = hook.next) {
+                const v = hook.memoizedState;
+                if (afkEsPanorama(v)) return guardar(v, 'hook');
+                if (v && typeof v === 'object' && afkEsPanorama(v.current)) return guardar(v.current, 'hook.current');
+            }
+        }
+
+        return null;
+    }
+
+    // Giro suave: muchos pasitos en vez de un salto, para que se parezca a un
+    // arrastre y no a un corte de camara.
+    function afkGirar(grados) {
+        const pano = afkFindPanorama();
+        if (!pano) return false;
+
+        const pov = pano.getPov();
+        let i = 0;
+
+        afkMoving = true;
+        const paso = () => {
+            i++;
+            pano.setPov({
+                heading: pov.heading + (grados * i) / AFK_MOVE_STEPS,
+                pitch: pov.pitch + Math.sin((i / AFK_MOVE_STEPS) * Math.PI) * 3
+            });
+            if (i < AFK_MOVE_STEPS) {
+                setTimeout(paso, AFK_MOVE_STEP);
+                return;
+            }
+            afkMoving = false;
+        };
+        paso();
+        return true;
+    }
+
+    // Tecla para el panorama: hay que poner keyCode a mano, el constructor lo
+    // ignora y los handlers lo miran.
+    function afkTecla(tipo, key, codigo, repeat = false) {
+        const ev = new KeyboardEvent(tipo, {
+            key, code: key, bubbles: true, cancelable: true, view: window, repeat
+        });
+        Object.defineProperty(ev, 'keyCode', { get: () => codigo });
+        Object.defineProperty(ev, 'which', { get: () => codigo });
+        return ev;
+    }
+
+    // A donde se mandan las teclas: al panorama y al documento, porque no se
+    // sabe si la flecha la atiende GeoGuessr (handler arriba de todo) o Google
+    // (handler en el panorama).
+    function afkBlancosTecla() {
+        const lienzo = afkCanvas();
+        const destino = (lienzo && lienzo.closest('[class*="game-layout"], [tabindex]')) || lienzo;
+        if (!destino) return null;
+
+        try { destino.focus({ preventScroll: true }); } catch (e) { /* noop */ }
+        return [destino, document];
+    }
+
+    // Un toque de flecha: en el juego, arriba/abajo avanza y retrocede.
+    function afkPasoAdelante() {
+        const blancos = afkBlancosTecla();
+        if (!blancos) return false;
+
+        blancos.forEach(b => b.dispatchEvent(afkTecla('keydown', 'ArrowUp', 38)));
+        setTimeout(() => blancos.forEach(b => b.dispatchEvent(afkTecla('keyup', 'ArrowUp', 38))), AFK_KEY_HOLD);
+        return true;
+    }
+
+    // Un toque de cualquier tecla, para las que no necesitan mantenerse.
+    function afkToque(key, codigo, ms = 120) {
+        const blancos = afkBlancosTecla();
+        if (!blancos) return false;
+
+        blancos.forEach(b => b.dispatchEvent(afkTecla('keydown', key, codigo)));
+        setTimeout(() => blancos.forEach(b => b.dispatchEvent(afkTecla('keyup', key, codigo))), ms);
+        return true;
+    }
+
+    // Mirar para arriba o para abajo. En el juego las flechas verticales mueven,
+    // asi que el candidato es Page Up / Page Down; si GeoGuessr no las ata a
+    // nada, esto no hace nada (probalo con ALT+L).
+    function afkMirarVertical(signo) {
+        return afkToque(signo < 0 ? 'PageUp' : 'PageDown', signo < 0 ? 33 : 34, 200);
+    }
+
+    // Zoom. Candidatos: la tecla +/- de arriba y la del teclado numerico.
+    function afkZoom(signo) {
+        const key = signo > 0 ? '+' : '-';
+        afkToque(key, signo > 0 ? 187 : 189, 120);   // fila de numeros
+        return afkToque(key, signo > 0 ? 107 : 109, 120);   // numerico
+    }
+
+    // Flecha mantenida: en el juego, izquierda/derecha hundidas rotan la vista.
+    // Un teclado de verdad repite el keydown mientras la tecla sigue abajo.
+    function afkGirarTecla(grados) {
+        const blancos = afkBlancosTecla();
+        if (!blancos) return false;
+
+        const key = grados < 0 ? 'ArrowLeft' : 'ArrowRight';
+        const codigo = grados < 0 ? 37 : 39;
+        const ms = Math.min(1500, Math.max(200, Math.abs(grados) * 12));
+
+        afkMoving = true;
+        blancos.forEach(b => b.dispatchEvent(afkTecla('keydown', key, codigo)));
+        const repetir = setInterval(() => {
+            blancos.forEach(b => b.dispatchEvent(afkTecla('keydown', key, codigo, true)));
+        }, AFK_KEY_REPEAT);
+
+        setTimeout(() => {
+            clearInterval(repetir);
+            blancos.forEach(b => b.dispatchEvent(afkTecla('keyup', key, codigo)));
+            afkMoving = false;
+        }, ms);
+        return true;
+    }
+
+    // Prueba a mano (ALT+G / ALT+H). Hace lo mismo que el bucle, pero mide si
+    // la pantalla cambio de verdad y lo deja escrito en el panel, asi se puede
+    // probar en plena ronda sin tener la consola abierta.
+    function afkProbar(que, grados = 60) {
+        const pano = afkFindPanorama();
+        const rumboAntes = pano ? pano.getPov().heading : null;
+        const panoAntes = pano && typeof pano.getPano === 'function' ? pano.getPano() : null;
+
+        let r;
+        if (que === 'giro') {
+            r = !afkPuedeGirar() ? 'no permitido en esta partida'
+              : afkGirar(grados) ? 'mandado'
+              : 'no encontre el panorama';
+        } else if (que === 'zoom') {
+            r = afkZoom(1) ? 'mandado' : 'no encontre el panorama';
+        } else if (que === 'mirar arriba') {
+            r = afkMirarVertical(-1) ? 'mandado' : 'no encontre el panorama';
+        } else if (que === 'giro con tecla') {
+            r = !afkPuedeGirar() ? 'no permitido en esta partida'
+              : afkGirarTecla(grados) ? 'mandado'
+              : 'no encontre el panorama';
+        } else {
+            r = !afkPuedeMover() ? 'no permitido en esta partida'
+              : afkPasoAdelante() ? 'mandada'
+              : 'no encontre el panorama';
+        }
+
+        afkTestMsg = `${que}: ${r}`;
+        updateAfkDisplay();
+        console.log('[GeoLince][AFK] prueba ->', afkTestMsg);
+
+        // Y despues miramos si paso algo de verdad.
+        if (pano && r !== 'no permitido en esta partida') {
+            setTimeout(() => {
+                const funciono = que.startsWith('giro')
+                    ? Math.abs(pano.getPov().heading - rumboAntes) >= 1
+                    : (typeof pano.getPano === 'function' && pano.getPano() !== panoAntes);
+                afkTestMsg = `${que}: ${r} -> ${funciono ? 'FUNCIONA' : 'no paso nada'}`;
+                updateAfkDisplay();
+                console.log('[GeoLince][AFK] prueba ->', afkTestMsg);
+            }, 2500);
+        }
+
+        return afkTestMsg;
+    }
+
+    // Rumbo (0-360) para ir de un punto al otro.
+    function afkRumboEntre(aLat, aLng, bLat, bLng) {
+        const r = Math.PI / 180;
+        const dLng = (bLng - aLng) * r;
+        const y = Math.sin(dLng) * Math.cos(bLat * r);
+        const x = Math.cos(aLat * r) * Math.sin(bLat * r)
+                - Math.sin(aLat * r) * Math.cos(bLat * r) * Math.cos(dLng);
+        return (Math.atan2(y, x) / r + 360) % 360;
+    }
+
+    function afkPosValida(a, b) {
+        return typeof a === 'number' && typeof b === 'number'
+            && isFinite(a) && isFinite(b) && Math.abs(a) <= 90 && Math.abs(b) <= 180;
+    }
+
+    // Seguir la calle. El script ya captura las coordenadas de cada panorama,
+    // asi que se puede medir hacia donde nos llevo el ultimo paso: si el tramo
+    // nuevo apunta mas a un costado que el anterior, la calle doblo y hay que
+    // girar para ese lado, que es lo que hace cualquiera caminando.
+    //
+    // Devuelve true si mando un giro, para dejar ese tiempo al ajuste y dar el
+    // paso siguiente recien despues.
+    function afkSeguirCalle() {
+        const antes = afkPosAntes;
+        afkPosAntes = null;
+
+        if (!antes || !afkPuedeGirar() || !afkPosValida(lat, lng)) return false;
+
+        const dLat = lat - antes.lat;
+        const dLng = lng - antes.lng;
+        const salto = Math.abs(dLat) + Math.abs(dLng);
+
+        if (salto < 1e-6) return false;      // el paso no movio nada
+        if (salto > 0.01) {                  // ronda nueva: otro lugar del mundo
+            afkRumboCalle = null;
+            return false;
+        }
+
+        const rumbo = afkRumboEntre(antes.lat, antes.lng, lat, lng);
+        const anterior = afkRumboCalle;
+        afkRumboCalle = rumbo;
+
+        if (anterior === null) return false;  // todavia no hay con que comparar
+
+        const giro = ((rumbo - anterior + 540) % 360) - 180;
+        if (Math.abs(giro) < 6) return false; // la calle sigue derecha
+
+        return afkGirarTecla(Math.max(-70, Math.min(70, giro)));
+    }
+
+    // Un paseo, no un manojo de movimientos sueltos.
+    //
+    // Con ArrowUp se avanza hacia donde se esta mirando, asi que girar mucho
+    // entre paso y paso es lo que hacia el ida y vuelta: dos adelante, giro,
+    // dos atras. Por eso ahora camina varios pasos derecho, y los giros grandes
+    // quedan para las pausas, como doblar en una esquina.
+    //
+    // Todo por tecla: es lo unico que funciona en GeoGuessr (Google ignora el
+    // mouse sintetico) y ademas asi quien decide que se puede hacer es el juego.
+    function afkMoveTick() {
+        if (afkMoving) return;
+        if (!afkPuedeGirar() && !afkPuedeMover()) {
+            afkMoveOk = false;
+            return;
+        }
+
+        const ahora = Date.now();
+        if (ahora < afkNextMove) return;
+
+        // Caminando: pasos seguidos, sin giros grandes, que es como se recorre
+        // una calle. Lo unico que se corrige en el medio es el rumbo, cuando la
+        // calle dobla.
+        if (afkPasos > 0 && afkPuedeMover()) {
+            if (afkSeguirCalle()) {
+                afkNextMove = ahora + 400 + Math.random() * 400;   // ajustar y seguir
+                afkMoveOk = true;
+                return;
+            }
+
+            afkPasos--;
+            afkPosAntes = afkPosValida(lat, lng) ? { lat, lng } : null;
+            afkMoveOk = afkPasoAdelante();
+            afkNextMove = ahora + AFK_STEP_MIN + Math.random() * (AFK_STEP_MAX - AFK_STEP_MIN);
+            return;
+        }
+
+        // Pausa entre caminatas: mirar un poco o doblar, y seguir viaje.
+        afkNextMove = ahora + AFK_PAUSE_MIN + Math.random() * (AFK_PAUSE_MAX - AFK_PAUSE_MIN);
+        afkPasos = afkPuedeMover() ? 3 + Math.floor(Math.random() * 5) : 0;   // 3 a 7 cuadras
+        afkPosAntes = null;
+        afkRumboCalle = null;   // arranca otro tramo: el rumbo viejo ya no sirve
+
+        if (!afkPuedeGirar()) {
+            afkMoveOk = afkPasos > 0;
+            return;
+        }
+
+        const signo = Math.random() < 0.5 ? -1 : 1;
+
+        if (Math.random() < 0.3) {
+            // Doblar: giro grande para agarrar otra calle.
+            afkMoveOk = afkGirarTecla(signo * (60 + Math.random() * 70));
+            return;
+        }
+
+        // Mirar alrededor sin perder el rumbo: giro corto, a veces levantando
+        // la vista o acercando un poco.
+        afkMoveOk = afkGirarTecla(signo * (15 + Math.random() * 35));
+        if (Math.random() < 0.35) setTimeout(() => afkMirarVertical(Math.random() < 0.5 ? -1 : 1), 600);
+        if (Math.random() < 0.25) setTimeout(() => afkZoom(Math.random() < 0.5 ? 1 : -1), 900);
     }
 
     function afkSetPhase(texto) {
@@ -774,9 +1205,23 @@
         } catch (e) { /* noop */ }
     }
 
+    // Envoltorio: si algo adentro explota, el bucle se quedaba congelado en la
+    // ultima fase sin decir nada. Ahora se ve en el panel y en la consola.
     function afkTick() {
         if (!afkOn) return;
 
+        try {
+            afkTickInterno();
+        } catch (e) {
+            if (!afkErrorLogged) {
+                afkErrorLogged = true;
+                console.error('[GeoLince][AFK] se rompio el bucle:', e);
+            }
+            afkSetPhase('error, mira la consola');
+        }
+    }
+
+    function afkTickInterno() {
         afkSaveState();
 
         // La partida se cuenta al salir de ella, no por cada "Continuar": despues
@@ -786,6 +1231,10 @@
             afkInMatchBefore = true;
         } else if (afkInMatchBefore) {
             afkInMatchBefore = false;
+            afkPano = null;      // el panorama era de esa partida
+            afkMatchLogged = false;
+            afkErrorLogged = false;
+            afkMoveOk = false;
             afkGames++;
             updateAfkDisplay();
         }
@@ -807,7 +1256,12 @@
                 console.warn('[GeoLince][AFK] 10 min sin avanzar. Esto es lo clickeable:',
                              afkDebugClickables());
             }
-            afkSetPhase(afkStuckLogged ? 'trabado, mira la consola' : 'en partida, sin marcar');
+            afkMoveTick();
+            afkSetPhase(afkStuckLogged ? 'trabado, mira la consola'
+                      : !afkMoveOn ? 'en partida, quieto'
+                      : !afkPuedeGirar() && !afkPuedeMover() ? 'en partida, sin poder moverse'
+                      : afkMoveOk ? 'en partida, paseando'
+                      : 'en partida, sin marcar');
             return;
         }
 
@@ -828,9 +1282,14 @@
                                  afkDebugClickables());
                 }
                 afkSetPhase('esperando el lobby');
+            } else if (document.querySelector(AFK_MATCH_FUERTE)) {
+                // Hay pantalla de partida: ese "Jugar" no es el del lobby.
+                afkSetPhase('hay partida en pantalla, no toco nada');
             } else if (Date.now() - afkLastPlay > AFK_PLAY_COOLDOWN && afkClick(jugar, 'Jugar')) {
                 afkLastPlay = Date.now();
                 afkSetPhase('entrando a la cola');
+            } else {
+                afkSetPhase('en la cola, esperando');
             }
             return;
         }
@@ -862,6 +1321,12 @@
             afkLastPlay = 0;   // el primer "Jugar" sale sin esperar
             afkInMatchBefore = afkInMatch();
             afkStuckLogged = false;
+            afkPano = null;
+            afkMoveOk = false;
+            afkNextMove = 0;
+            afkPasos = 0;
+            afkPosAntes = null;
+            afkRumboCalle = null;
             afkPhase = 'arrancando';
             afkIdleSince = Date.now();
             afkTimer = setInterval(afkTick, AFK_TICK);
@@ -879,6 +1344,21 @@
         setAfk(!afkOn);
     }
 
+    // Dos formas de estar AFK: quieto como estatua, o paseando por la calle.
+    function setMovimiento(on) {
+        afkMoveOn = on;
+        afkPasos = 0;
+        afkNextMove = 0;
+        try { localStorage.setItem('gg_afkQuieto', on ? 'false' : 'true'); } catch (e) { /* noop */ }
+        console.log('[GeoLince][AFK] movimiento', on ? 'encendido (paseo)' : 'apagado (quieto)');
+        updateAfkDisplay();
+        return afkMoveOn;
+    }
+
+    function toggleMovimiento() {
+        return setMovimiento(!afkMoveOn);
+    }
+
     // Enganche para la consola (el script corre en el contexto de la pagina):
     //   GeoLinceAFK.estado()        -> en que anda el bucle
     //   GeoLinceAFK.clickeables()   -> que botones ve en esta pantalla
@@ -887,6 +1367,16 @@
         on: () => setAfk(true),
         off: () => setAfk(false),
         clickeables: afkDebugClickables,
+        panorama: afkFindPanorama,
+        movimiento: (on = true) => setMovimiento(on),
+        // Pruebas a mano (ALT+G / ALT+H hacen lo mismo). Respetan las reglas
+        // de la partida: si no deja, no se fuerza nada, se avisa.
+        probarGiro: (grados = 60) => afkProbar('giro', grados),
+        reglas: () => afkReglas,
+        probarPaso: () => afkProbar('paso'),
+        probarGiroTecla: (grados = 60) => afkProbar('giro con tecla', grados),
+        probarZoom: () => afkProbar('zoom'),
+        probarMirar: () => afkProbar('mirar arriba'),
         estado: () => ({
             encendido: afkOn,
             fase: afkPhase,
@@ -895,6 +1385,12 @@
             lobby: afkInLobby(),
             enPartida: afkInMatch(),
             pantallaDePartida: Boolean(document.querySelector(AFK_MATCH_SELECTOR)),
+            movimiento: afkMoveOn,
+            puedeGirar: afkPuedeGirar(),
+            puedeMover: afkPuedeMover(),
+            reglas: afkReglas,
+            panorama: Boolean(afkFindPanorama()),
+            rumbo: afkPano ? Math.round(afkPano.getPov().heading) : null,
             jugar: findVisibleButtonByText('jugar', 'play') || null,
             continuar: findVisibleButtonByText('continuar', 'continue') || null
         })
@@ -905,11 +1401,16 @@
             afkButton.textContent = afkOn ? 'Detener AFK (ALT+0)' : 'Activar AFK (ALT+0)';
             afkButton.classList.toggle('gl-btn-on', afkOn);
         }
+        if (afkMoveButton) {
+            afkMoveButton.textContent = afkMoveOn ? 'Paseando (ALT+M)' : 'Quieto (ALT+M)';
+            afkMoveButton.classList.toggle('gl-btn-on', afkMoveOn);
+        }
         if (!afkDisplay) return;
 
         afkDisplay.innerHTML = `
             <div class="gl-status-line">${glDot(afkOn)}<b>${afkOn ? 'ACTIVO' : 'APAGADO'}</b> · Partidas ${afkGames}</div>
             <div>${afkPhase}</div>
+            ${afkTestMsg ? `<div style="color:#e5a54f;">${afkTestMsg}</div>` : ''}
         `;
     }
 
@@ -1245,7 +1746,9 @@
                         <div class="gl-keys">Z ver mapa · X zoom+2 · C zoom−2 · N coords · M mapa · CTRL+Q panel · CTRL+E vistas · ALT+P ventana · * detener
 ALT 1 jugar · 2 marcar · 3 guess · 4 next · 5 resultados · 6 de nuevo
 ALT 7 streak×5 · 8 streak×25 · 9 marca 5K
-ALT 0 AFK multiplayer (jugar / continuar solo)</div>
+ALT 0 AFK multiplayer (jugar / continuar solo)
+ALT G giro (API) · ALT H paso · ALT J giro (tecla)
+ALT K zoom · ALT L mirar arriba · ALT M paseo/quieto</div>
                     </div>
                     <div class="gl-divider"></div>
                     <div>
@@ -1257,6 +1760,7 @@ ALT 0 AFK multiplayer (jugar / continuar solo)</div>
                         <div class="gl-section-label">Multiplayer AFK</div>
                         <div class="gl-zoom-row">
                             <button class="gl-btn" id="glAfkBtn" title="Entra a la cola, deja jugar al rival y encadena partidas">Activar AFK (ALT+0)</button>
+                            <button class="gl-btn" id="glAfkMoveBtn" title="Pasear por la calle durante la ronda, o quedarse completamente quieto">Paseando (ALT+M)</button>
                         </div>
                         <div class="gl-mono" id="glAfkDisplay"></div>
                     </div>
@@ -1290,6 +1794,13 @@ ALT 0 AFK multiplayer (jugar / continuar solo)</div>
         afkButton.addEventListener('click', (e) => {
             e.stopPropagation();
             toggleAfk();
+        });
+
+        afkMoveButton = controlDiv.querySelector('#glAfkMoveBtn');
+        afkMoveButton.addEventListener('mousedown', (e) => e.stopPropagation());
+        afkMoveButton.addEventListener('click', (e) => {
+            e.stopPropagation();
+            toggleMovimiento();
         });
         updateAfkDisplay();
 
@@ -1594,6 +2105,36 @@ ALT 0 AFK multiplayer (jugar / continuar solo)</div>
                 case '0':
                     event.stopImmediatePropagation();
                     toggleAfk();
+                    break;
+                case 'g':
+                    event.stopImmediatePropagation();
+                    event.preventDefault();
+                    afkProbar('giro');
+                    break;
+                case 'h':
+                    event.stopImmediatePropagation();
+                    event.preventDefault();
+                    afkProbar('paso');
+                    break;
+                case 'j':
+                    event.stopImmediatePropagation();
+                    event.preventDefault();
+                    afkProbar('giro con tecla');
+                    break;
+                case 'm':
+                    event.stopImmediatePropagation();
+                    event.preventDefault();
+                    toggleMovimiento();
+                    break;
+                case 'k':
+                    event.stopImmediatePropagation();
+                    event.preventDefault();
+                    afkProbar('zoom');
+                    break;
+                case 'l':
+                    event.stopImmediatePropagation();
+                    event.preventDefault();
+                    afkProbar('mirar arriba');
                     break;
                 case '*':
                     event.stopImmediatePropagation();

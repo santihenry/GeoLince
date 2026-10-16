@@ -85,7 +85,7 @@ Si te gusta GeoGuessr, jugá sin esto. Es mejor juego.
 | **Mapa en ventana aparte** | Abre la posición en Google Maps o OpenStreetMap en una ventana separada, con control de zoom. Ideal para un segundo monitor. |
 | **Marcador automático** *(solo completa)* | Coloca el pin en el mapa de guess de GeoGuessr en las coordenadas reales (con desvío configurable), hablándole directamente al mapa vía React Fiber. |
 | **AutoPlay (Streaks)** *(solo completa)* | Juega solo: marca, adivina, pasa de ronda y arranca partida nueva, con una cadena de reintentos cuando no logra detectar coordenadas. |
-| **AFK multiplayer** *(solo completa)* | Encadena duelos sin jugarlos: entra a la cola, deja correr las rondas sin marcar el mapa, toca **Continuar** al terminar y vuelve a tocar **Jugar**. |
+| **AFK multiplayer** *(solo completa)* | Encadena duelos sin jugarlos: entra a la cola, deja correr las rondas sin marcar el mapa (girando la vista para no quedar duro), toca **Continuar** al terminar y vuelve a tocar **Jugar**. |
 | **Panel plegable** | Tres bloques que se muestran/ocultan por separado, y opción de sacar todo el panel a su propia ventana. |
 
 ---
@@ -253,6 +253,8 @@ Ahí dentro:
 | `Alt + 8` | AutoPlay Streaks: 50 partidas de 25 rondas. |
 | `Alt + 9` | Marca a ~0.00035° del punto real (5.000 puntos). |
 | `Alt + 0` | Enciende/apaga el **AFK multiplayer**. |
+| `Alt + M` | Cambia entre **paseando** y **quieto**. |
+| `Alt + G` / `H` / `J` / `K` / `L` | Pruebas sueltas: giro por API, paso, giro por tecla, zoom, mirar arriba. |
 | `Alt + *` | Detiene el AutoPlay y el AFK multiplayer. |
 
 ---
@@ -302,9 +304,105 @@ El bucle revisa la pantalla cada 1,2 s y hace una sola cosa por vuelta:
 |---|---|
 | Lobby de duelos (`/multiplayer/duels`) | Click en **Jugar**. |
 | Buscando rival | Nada: volver a tocar **Jugar** cancelaría la cola. Si pasan 3 minutos, reintenta. |
-| En partida | **Nada.** No marca, no adivina, no pasa de ronda: las rondas se vencen solas por tiempo. |
+| En partida | **No marca, no adivina, no pasa de ronda**: las rondas se vencen solas por tiempo. Lo único que hace es pasear por la calle, y solo si está en modo Paseando. |
 | Pantalla final (y los carteles de ascenso) | Click en **Continuar**. |
 | Cualquier otra página | Vuelve al lobby a los 8 segundos. |
+
+### Moverse sin jugar
+
+Hay dos formas de estar AFK, y se cambia con el botón del panel o con `ALT + M`:
+
+| Modo | Qué hace |
+|---|---|
+| **Quieto** | No toca absolutamente nada en toda la partida. |
+| **Paseando** *(por defecto)* | Recorre la calle mientras corre la ronda. |
+
+La elección queda guardada en `gg_afkQuieto`.
+
+**El paseo no es un manojo de movimientos sueltos.** Con `ArrowUp` se avanza hacia donde se
+está mirando, así que girar mucho entre paso y paso da el ida y vuelta típico: dos adelante,
+giro, dos atrás. Por eso camina derecho y los giros grandes quedan para las pausas:
+
+| Momento | Qué manda |
+|---|---|
+| **Caminata** | 3 a 7 toques de `ArrowUp`, uno cada 0,6-1,3 s, **sin giros grandes**: así recorre la cuadra. |
+| **Corrección** | Entre paso y paso, si la calle dobló, gira para ese lado (ver abajo). |
+| **Pausa** (1-4 s) | 30% de las veces dobla (giro de 60° a 130°, como agarrar otra calle). El resto, mira alrededor sin perder el rumbo (15° a 50°), a veces levantando la vista o cambiando el zoom. |
+
+#### Seguir la calle
+
+Avanzar sin girar nunca se nota: en una calle con curva quedarías caminando de costado. Para
+girar hacia donde va la calle hay que saber hacia dónde fue el paso, y eso el script **ya lo
+sabe**: captura las coordenadas de cada panorama (es lo que hace para mostrarlas).
+
+Entonces, antes de cada paso compara el tramo recién caminado con el anterior:
+
+1. Rumbo del tramo anterior, con la fórmula de rumbo entre dos puntos.
+2. Rumbo del tramo nuevo.
+3. Si la diferencia pasa los 6°, la calle dobló: gira esa misma cantidad (hasta 70°) y recién
+   después da el paso siguiente.
+
+Un salto de más de 0,01° es una ronda nueva, no una curva, así que ahí se descarta la
+referencia en vez de pegar un volantazo.
+
+Girar es `ArrowLeft` / `ArrowRight` **mantenidas**: `keydown`, repetido cada 50 ms como hace
+un teclado de verdad, y `keyup` a los 200-1100 ms según los grados.
+
+| Tecla | ¿La ata GeoGuessr? |
+|---|---|
+| `ArrowUp` (avanzar) | Sí |
+| `ArrowLeft` / `ArrowRight` mantenidas (girar) | Sí |
+| `+` / `-` (zoom) | Sí |
+| `PageUp` / `PageDown` (mirar arriba y abajo) | **No** |
+
+O sea que mirar arriba y abajo no se puede por teclado. La llamada sigue en el paseo (no
+molesta: manda una tecla que nadie atiende) por si alguna vez la atan. Lo único que la hace
+hoy es `ALT + L`, que avisa que no pasó nada.
+
+Las teclas se mandan al contenedor del panorama **y** a `document`, porque el que las
+atiende es GeoGuessr, no Google.
+
+**Lo que no funciona, probado:** simular el mouse. Contra un `StreetViewPanorama` real del
+Maps JS API (el mismo que embebe GeoGuessr), un arrastre de verdad giró 108° y el mismo
+arrastre despachado por código, 0° — en seis variantes (sobre el canvas, sobre
+`elementFromPoint`, solo `MouseEvent`, solo `PointerEvent`, con `movementX`, con la captura
+de puntero anulada, en `window`, y con tiempo real entre pasos). Google ignora los eventos
+sintéticos para el paneo. Las teclas, en cambio, sí llegan, porque las maneja GeoGuessr.
+
+### Y el modo de la partida
+
+Que todo salga por teclado es lo que hace que **el modo se respete solo**: las teclas pasan
+por el juego, que ya sabe si esa partida deja moverse, girar o hacer zoom.
+
+| Modo | Qué pasa |
+|---|---|
+| **Moving** | Camina, dobla y mira. |
+| **No move** | Gira y hace zoom; `ArrowUp` no hace nada. |
+| **NMPZ** | No se mueve nada: ninguna tecla hace nada. |
+
+Además, si el JSON de la partida pasa por el interceptor que el script ya tiene para las
+coordenadas, se leen `forbidRotating` / `forbidMoving` y directamente no se mandan teclas
+que no corresponden (`GeoLinceAFK.reglas()`). Es un refuerzo, no la defensa principal.
+
+`pano.setPov()` **no se usa en el bucle**: giraría igual donde el modo no deja, y encima en
+GeoGuessr el panorama no se alcanza por el fiber de React. Queda solo en la prueba manual
+`ALT + G`. `setPano()` no se usa en ningún lado, y el test lo verifica.
+
+### Probar a mano
+
+En plena ronda, con el resultado escrito en el panel (no hace falta la consola). Cada
+prueba mide si la pantalla cambió de verdad y dice `FUNCIONA` o `no pasó nada`:
+
+| Atajo | Qué manda |
+|---|---|
+| `ALT + G` | Giro por `setPov()` (en GeoGuessr: *no encontré el panorama*). |
+| `ALT + H` | Un toque de `ArrowUp`. |
+| `ALT + J` | Giro con la flecha mantenida. |
+| `ALT + K` | Zoom. **Anda.** |
+| `ALT + L` | Mirar hacia arriba. **No anda**: GeoGuessr no ata `PageUp`. |
+
+Lo mismo desde la consola: `GeoLinceAFK.probarPaso()`, `.probarGiroTecla()`, `.probarZoom()`,
+`.probarMirar()` y `.probarGiro()`.
 
 Detalles:
 
@@ -325,7 +423,8 @@ Detalles:
   botón de la pantalla final), lo avisa por consola con todo lo clickeable que había
   y lo deja marcado en el panel.
 - Para depurar desde la consola: `GeoLinceAFK.estado()`, `GeoLinceAFK.clickeables()`,
-  `GeoLinceAFK.on()` y `GeoLinceAFK.off()`.
+  `GeoLinceAFK.on()`, `GeoLinceAFK.off()`, `GeoLinceAFK.movimiento(false)`,
+  `GeoLinceAFK.reglas()`, `GeoLinceAFK.probarGiro()` y `GeoLinceAFK.probarPaso()`.
 
 Se detiene con `Alt + 0`, con `*` o con el mismo botón del panel.
 
@@ -334,7 +433,7 @@ El bloque del panel muestra:
 | Línea | Significado |
 |---|---|
 | `● ACTIVO / APAGADO · Partidas n` | Si el bucle corre, y cuántas partidas terminó desde que se encendió. |
-| Texto de estado | `buscando rival`, `en partida, sin marcar`, `cerrando resultados`, `volviendo al lobby`, `trabado, mira la consola`… |
+| Texto de estado | `buscando rival`, `en partida, paseando`, `en partida, quieto`, `en la cola, esperando`, `cerrando resultados`, `volviendo al lobby`, `trabado, mira la consola`, `error, mira la consola`… |
 
 ---
 
