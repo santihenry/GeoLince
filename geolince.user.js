@@ -1239,8 +1239,8 @@
             updateAfkDisplay();
         }
 
-        // 1) Fin de partida y pantallas que vienen detras: "Continuar".
-        const continuar = findVisibleButtonByText('continuar', 'continue');
+        // 1) Fin de partida y pantallas que vienen detras: "Jugar de nuevo".
+        const continuar = findVisibleButtonByText('jugar de nuevo', 'play again', 'continuar', 'continue');
         if (continuar) {
             if (afkClick(continuar, 'Continuar')) afkSetPhase('cerrando resultados');
             return;
@@ -1392,7 +1392,7 @@
             panorama: Boolean(afkFindPanorama()),
             rumbo: afkPano ? Math.round(afkPano.getPov().heading) : null,
             jugar: findVisibleButtonByText('jugar', 'play') || null,
-            continuar: findVisibleButtonByText('continuar', 'continue') || null
+            continuar: findVisibleButtonByText('jugar de nuevo', 'play again', 'continuar', 'continue') || null
         })
     };
 
